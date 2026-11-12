@@ -1,5 +1,6 @@
 const fs = require('fs').promises;
 const path = require('path');
+const imageStorage = require('../utils/imageStorage');
 
 class StorageHealthService {
   constructor() {
@@ -37,6 +38,17 @@ class StorageHealthService {
   }
 
   async getHealth() {
+    if (imageStorage.isBlobStorage()) {
+      const health = { status: 'OK', provider: 'vercel-blob', local_only_storage: false, directories: {}, warnings: [] };
+      try {
+        if (!process.env.BLOB_READ_WRITE_TOKEN) throw new Error('Blob upload token is not configured');
+        await require('@vercel/blob').list({ limit: 1 });
+      } catch (error) {
+        health.status = 'ERROR';
+        health.warnings.push('Private image storage is unavailable. Check the Blob connection and upload token.');
+      }
+      return health;
+    }
     const directories = {};
     const warnings = [];
 

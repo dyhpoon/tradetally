@@ -1,10 +1,12 @@
 const db = require('../config/database');
 const fs = require('fs').promises;
 const path = require('path');
+const { randomUUID } = require('crypto');
 const { createWriteStream } = require('fs');
 const { toCamelCase, toSnakeCase } = require('../utils/caseConvert');
 
 const SAFE_IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
+const BLOB_BACKUP_PREFIX = 'vercel-blob:backups/';
 
 function quoteIdentifier(identifier) {
   if (typeof identifier !== 'string' || !SAFE_IDENTIFIER.test(identifier)) {
@@ -72,9 +74,21 @@ class BackupService {
     this.backupDir = path.resolve(process.env.BACKUP_DIR || path.join(__dirname, '../data/backups'));
   }
 
+  isBlobBackup(filePath) {
+    return typeof filePath === 'string' && filePath.startsWith(BLOB_BACKUP_PREFIX);
+  }
+
   resolveBackupPath(filePath) {
     if (typeof filePath !== 'string' || filePath.trim() === '') {
       throw new Error('Invalid backup path');
+    }
+
+    if (this.isBlobBackup(filePath)) {
+      const filename = filePath.slice(BLOB_BACKUP_PREFIX.length);
+      if (!/^[a-zA-Z0-9_-]+\.json$/.test(filename)) {
+        throw new Error('Invalid backup path');
+      }
+      return filePath;
     }
 
     const resolvedPath = path.resolve(filePath);
@@ -83,6 +97,27 @@ class BackupService {
     }
 
     return resolvedPath;
+  }
+
+  async getBackupBlob(filePath) {
+    const resolvedPath = this.resolveBackupPath(filePath);
+    if (!this.isBlobBackup(resolvedPath)) throw new Error('Invalid backup path');
+    return require('@vercel/blob').get(resolvedPath.slice('vercel-blob:'.length), {
+      access: 'private', useCache: false
+    });
+  }
+
+  async deleteBackupFile(filePath) {
+    const resolvedPath = this.resolveBackupPath(filePath);
+    if (this.isBlobBackup(resolvedPath)) {
+      await require('@vercel/blob').del(resolvedPath.slice('vercel-blob:'.length));
+      return;
+    }
+    try {
+      await fs.unlink(resolvedPath);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
   }
 
   /**
@@ -106,28 +141,36 @@ class BackupService {
   async createFullSiteBackup(userId, type = 'manual') {
     console.log(`[BACKUP] Starting full site backup (type: ${type})`);
 
-    await this.ensureBackupDirectory();
+    const blobStorage = process.env.IMAGE_STORAGE_PROVIDER === 'vercel-blob';
+    if (!blobStorage) await this.ensureBackupDirectory();
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupFileName = `tradetally-backup-${timestamp}.json`;
-    const backupFilePath = path.join(this.backupDir, backupFileName);
+    const backupFileName = `tradetally-backup-${timestamp}${blobStorage ? '-' + randomUUID() : ''}.json`;
+    const backupFilePath = blobStorage
+      ? BLOB_BACKUP_PREFIX + backupFileName
+      : path.join(this.backupDir, backupFileName);
 
     try {
       // Fetch all data from database
       const data = await this.fetchAllData();
 
-      // Write data to file
-      await fs.writeFile(backupFilePath, JSON.stringify(data, null, 2));
-
-      // Get file stats
-      const stats = await fs.stat(backupFilePath);
+      const contents = JSON.stringify(data, null, 2);
+      const size = Buffer.byteLength(contents, 'utf8');
+      if (blobStorage) {
+        await require('@vercel/blob').put('backups/' + backupFileName, contents, {
+          access: 'private', contentType: 'application/json',
+          addRandomSuffix: false, allowOverwrite: false
+        });
+      } else {
+        await fs.writeFile(backupFilePath, contents);
+      }
 
       // Save backup metadata to database
       const result = await db.query(
         `INSERT INTO backups (user_id, filename, file_path, file_size, backup_type, status, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, NOW())
          RETURNING *`,
-        [userId, backupFileName, backupFilePath, stats.size, type, 'completed']
+        [userId, backupFileName, backupFilePath, size, type, 'completed']
       );
 
       console.log(`[BACKUP] Backup completed successfully: ${backupFileName}`);
@@ -136,7 +179,7 @@ class BackupService {
         success: true,
         backup: result.rows[0],
         filename: backupFileName,
-        size: stats.size
+        size
       };
     } catch (error) {
       console.error('[BACKUP] Error creating backup:', error);
@@ -292,13 +335,12 @@ class BackupService {
         // Delete file if it exists
         if (backup.file_path) {
           try {
-            const resolvedPath = this.resolveBackupPath(backup.file_path);
-            await fs.unlink(resolvedPath);
+            await this.deleteBackupFile(backup.file_path);
           } catch (error) {
             if (error.message === 'Invalid backup path') {
               console.warn(`[BACKUP] Skipping unsafe backup path for backup ${backup.id}: ${backup.file_path}`);
-            } else if (error.code !== 'ENOENT') {
-              console.warn(`[BACKUP] Failed to delete backup file for backup ${backup.id}: ${error.message}`);
+            } else {
+              throw error;
             }
           }
         }
@@ -350,13 +392,21 @@ class BackupService {
     };
 
     const schedulerEnabled = process.env.ENABLE_BACKUP_SCHEDULER !== 'false';
-    const localOnlyStorage = this.backupDir.includes('/backend/src/data/backups');
+    const blobStorage = process.env.IMAGE_STORAGE_PROVIDER === 'vercel-blob';
+    const latestBackup = await db.query(
+      "SELECT created_at FROM backups WHERE status = 'completed' ORDER BY created_at DESC LIMIT 1"
+    );
+    const lastBackup = latestBackup.rows[0]?.created_at || settings.last_backup || null;
+    const localOnlyStorage = !blobStorage;
     const health = {
       scheduler_enabled: schedulerEnabled,
       backups_enabled: Boolean(settings.enabled),
-      backup_dir: this.backupDir,
+      backup_dir: blobStorage ? BLOB_BACKUP_PREFIX : this.backupDir,
+      storage_provider: blobStorage ? 'vercel-blob' : 'local',
       local_only_storage: localOnlyStorage,
-      last_backup: settings.last_backup || null,
+      includes_image_files: false,
+      backup_contents: 'Database records and image references. Image files are stored separately.',
+      last_backup: lastBackup,
       status: 'OK',
       warnings
     };
@@ -366,14 +416,14 @@ class BackupService {
     }
 
     if (!settings.enabled) {
-      warnings.push('Backups are disabled in backup settings.');
+      warnings.push('Automatic backups are disabled in backup settings. Manual backups remain available.');
     }
 
-    if (!settings.last_backup) {
+    if (!lastBackup) {
       warnings.push('No successful backup has been recorded yet.');
-    } else {
+    } else if (schedulerEnabled && settings.enabled) {
       const maxAge = scheduleWindows[settings.schedule] || scheduleWindows.daily;
-      const backupAgeMs = Date.now() - new Date(settings.last_backup).getTime();
+      const backupAgeMs = Date.now() - new Date(lastBackup).getTime();
       if (backupAgeMs > maxAge) {
         warnings.push(`Last backup is stale for the configured ${settings.schedule} schedule.`);
       }

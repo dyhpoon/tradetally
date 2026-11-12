@@ -2,6 +2,8 @@ const mockPoolQuery = jest.fn();
 const mockPoolConnect = jest.fn();
 let mockPoolConfig;
 
+jest.mock('@vercel/functions', () => ({ attachDatabasePool: jest.fn() }));
+
 jest.mock('pg', () => ({
   Pool: jest.fn((config) => {
     mockPoolConfig = config;
@@ -22,8 +24,16 @@ jest.mock('../../src/utils/ensurePostExitSchema', () => ({
 
 describe('database query wrapper', () => {
   let database;
+  const originalEnv = process.env;
+
+  afterEach(() => { process.env = originalEnv; });
 
   beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env.DATABASE_URL;
+    delete process.env.VERCEL;
+    delete process.env.SERVERLESS_RUNTIME;
+    delete process.env.DB_POOL_SIZE;
     jest.resetModules();
     mockPoolQuery.mockReset();
     mockPoolConnect.mockReset();
@@ -118,4 +128,39 @@ describe('database query wrapper', () => {
 
     expect(mockPoolConfig.options).toBe('-c search_path="tradetally",public');
   });
+
+  test.each(['VERCEL', 'SERVERLESS_RUNTIME'])('uses a small lifecycle-managed pool and verifies Neon TLS with %s', (runtimeVariable) => {
+    jest.resetModules();
+    process.env[runtimeVariable] = runtimeVariable === 'VERCEL' ? '1' : 'vercel';
+    process.env.DATABASE_URL = 'postgresql://user:password@ep-test-pooler.region.aws.neon.tech/db?sslmode=require';
+    const database = require('../../src/config/database');
+    const { attachDatabasePool } = require('@vercel/functions');
+
+    const url = new URL(mockPoolConfig.connectionString);
+    expect(url.searchParams.get('sslmode')).toBe('verify-full');
+    expect(mockPoolConfig).toMatchObject({ max: 5, idleTimeoutMillis: 5000 });
+    expect(mockPoolConfig).not.toHaveProperty('host');
+    expect(attachDatabasePool).toHaveBeenCalledWith(database.pool);
+  });
+
+  test('preserves explicitly configured pool limits and non-Neon URLs', () => {
+    jest.resetModules();
+    process.env.VERCEL = '1';
+    process.env.DB_POOL_SIZE = '3';
+    process.env.DATABASE_URL = 'postgresql://user:password@localhost/test';
+    require('../../src/config/database');
+
+    expect(mockPoolConfig.max).toBe(3);
+    expect(mockPoolConfig.connectionString).toBe(process.env.DATABASE_URL);
+  });
+
+  test('does not run request-time schema repair when system envs are hidden', async () => {
+    process.env.SERVERLESS_RUNTIME = 'vercel';
+    const error = Object.assign(new Error('column "post_exit_mae" does not exist'), { code: '42703' });
+    mockPoolQuery.mockRejectedValue(error);
+
+    await expect(database.query('SELECT post_exit_mae FROM trades')).rejects.toBe(error);
+    expect(mockEnsurePostExitSchema).not.toHaveBeenCalled();
+  });
+
 });

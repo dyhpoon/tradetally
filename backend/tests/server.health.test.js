@@ -69,9 +69,16 @@ const newsScheduler = require('../src/services/newsScheduler');
 const { buildHealthStatus } = require('../src/services/healthStatus.service');
 
 describe('server health status', () => {
+  const originalEnv = process.env;
+  afterEach(() => { process.env = originalEnv; });
   beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env.VERCEL;
+    delete process.env.SERVERLESS_RUNTIME;
+    delete process.env.DISABLE_BACKGROUND_JOBS;
     jest.clearAllMocks();
     db.query.mockResolvedValue({ rows: [{ '?column?': 1 }] });
+    backupService.getBackupHealth.mockResolvedValue({ status: 'OK', storage_provider: 'vercel-blob' });
     backgroundWorker.getStatus.mockReturnValue({ isRunning: true, queueProcessing: true });
     jobRecoveryService.getStatus.mockReturnValue({ isRunning: true });
     enrichmentCacheCleanupService.getStatus.mockReturnValue({ isRunning: true });
@@ -108,4 +115,49 @@ describe('server health status', () => {
       lastSuccessDate: '2026-08-27T12:00:00.000Z'
     }));
   });
+
+  test('reports intentionally disabled workers without degrading healthy serverless services', async () => {
+    process.env.SERVERLESS_RUNTIME = 'vercel';
+    process.env.DISABLE_BACKGROUND_JOBS = 'true';
+    backgroundWorker.getStatus.mockReturnValue({ isRunning: false, queueProcessing: false });
+    jobRecoveryService.getStatus.mockReturnValue({ isRunning: false });
+    storageHealthService.getHealth.mockResolvedValue({ status: 'OK' });
+
+    const health = await buildHealthStatus();
+
+    expect(health.status).toBe('OK');
+    for (const name of ['backgroundWorker', 'jobRecovery', 'enrichmentCacheCleanup', 'backupScheduler', 'newsScheduler']) {
+      expect(health.services[name].status).toBe('DISABLED');
+    }
+    expect(backupService.getBackupHealth).toHaveBeenCalledTimes(1);
+    expect(health.services.backups).toEqual({ status: 'OK', storage_provider: 'vercel-blob' });
+    expect(newsScheduler.getPersistentStatus).not.toHaveBeenCalled();
+  });
+
+  test('reports backup failures on Vercel even when the scheduler is disabled', async () => {
+    process.env.SERVERLESS_RUNTIME = 'vercel';
+    process.env.DISABLE_BACKGROUND_JOBS = 'true';
+    backupService.getBackupHealth.mockResolvedValue({ status: 'DEGRADED', warnings: ['No successful backup has been recorded yet.'] });
+    storageHealthService.getHealth.mockResolvedValue({ status: 'OK' });
+
+    const health = await buildHealthStatus();
+
+    expect(health.status).toBe('DEGRADED');
+    expect(health.services.backupScheduler.status).toBe('DISABLED');
+    expect(health.services.backups.status).toBe('DEGRADED');
+  });
+
+  test('still degrades disabled-worker deployments when the database or storage fails', async () => {
+    process.env.SERVERLESS_RUNTIME = 'vercel';
+    process.env.DISABLE_BACKGROUND_JOBS = 'true';
+    db.query.mockRejectedValue(new Error('database unavailable'));
+    storageHealthService.getHealth.mockResolvedValue({ status: 'ERROR' });
+
+    const health = await buildHealthStatus();
+
+    expect(health.status).toBe('DEGRADED');
+    expect(health.services.database).toBe('ERROR');
+    expect(health.services.storage.status).toBe('ERROR');
+  });
+
 });

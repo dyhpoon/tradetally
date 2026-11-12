@@ -773,7 +773,7 @@ async function loadData() {
             enabled: settingsRes.data.enabled,
             schedule: settingsRes.data.schedule,
             retentionDays: settingsRes.data.retention_days,
-            lastBackup: settingsRes.data.last_backup,
+            lastBackup: settingsRes.data.health?.last_backup || settingsRes.data.last_backup,
         };
         backupWarnings.value = settingsRes.data.health?.warnings || [];
         storageWarnings.value =

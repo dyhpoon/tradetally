@@ -1,3 +1,4 @@
+const { isVercelRuntime } = require('../utils/runtimeScope');
 const Trade = require('../models/Trade');
 const TradeQueries = require('../services/tradeQueries');
 const User = require('../models/User');
@@ -16,6 +17,7 @@ const yahooFinance = require('../utils/yahooFinance');
 const { convertQuoteCurrency } = require('../utils/quoteCurrency');
 const symbolCategories = require('../utils/symbolCategories');
 const imageProcessor = require('../utils/imageProcessor');
+const imageStorage = require('../utils/imageStorage');
 const ensureString = require('../utils/ensureString');
 const { parseTradeFilters, tradeFilterProfiles, restrictFiltersToTier } = require('../utils/tradeFilters');
 const upload = require('../middleware/upload');
@@ -34,6 +36,7 @@ const TierService = require('../services/tierService');
 const Account = require('../models/Account');
 const { verifyJwtToken, TOKEN_PURPOSES, isTokenSessionValid } = require('../middleware/auth');
 const { escapeCsv } = require('../utils/csvEscape');
+const { runBackgroundTask } = require('../utils/backgroundTask');
 
 // Excel workbooks, zipped exports and HTML reports are converted to CSV bytes
 // once at the upload boundary so detection, parsing and account scanning all
@@ -2155,17 +2158,37 @@ const tradeController = {
       const fileName = upload.fileName;
       const fileUserId = req.user.id;
 
-      // Ensure import continues in background regardless of client connection
-      process.nextTick(async () => {
-        // Set up a timeout to prevent stuck imports
+      runBackgroundTask(async () => {
+        const onVercel = isVercelRuntime();
+        const timeoutMs = onVercel ? 240000 : 10 * 60 * 1000;
+        const deadline = Date.now() + timeoutMs;
+        const timeoutMessage = onVercel
+          ? 'Import exceeded the 4-minute limit. Some trades may already be saved. Review this import and split remaining rows into smaller files.'
+          : 'Import timeout after 10 minutes';
+        let timedOut = false;
+        let imported = 0;
+        let failed = 0;
+        const assertImportActive = () => {
+          if (onVercel && (timedOut || Date.now() >= deadline)) {
+            const error = new Error(timeoutMessage);
+            error.code = 'IMPORT_TIMEOUT';
+            throw error;
+          }
+        };
         const importTimeout = setTimeout(async () => {
-          logger.logError(`Import ${importId} timed out after 10 minutes`);
-          await db.query(`
-            UPDATE import_logs
-            SET status = 'failed', error_details = $1, completed_at = CURRENT_TIMESTAMP
-            WHERE id = $2
-          `, [{ error: 'Import timeout after 10 minutes' }, importId]);
-        }, 10 * 60 * 1000); // 10 minutes
+          timedOut = true;
+          logger.logError(`Import ${importId}: ${timeoutMessage}`);
+          try {
+            await db.query(`
+              UPDATE import_logs
+              SET status = 'failed', error_details = $1, completed_at = CURRENT_TIMESTAMP,
+                  trades_imported = $3, trades_failed = $4
+              WHERE id = $2 AND status = 'processing'
+            `, [{ error: timeoutMessage }, importId, imported, failed]);
+          } catch (error) {
+            logger.logError(`Could not record import timeout: ${error.message}`);
+          }
+        }, timeoutMs);
         
         try {
           logger.logImport(`Starting import for user ${fileUserId}, broker: ${broker}, file: ${fileName}`);
@@ -2376,6 +2399,7 @@ const tradeController = {
           };
 
           const parseResult = await parseCSV(fileBuffer, broker, context);
+          assertImportActive();
 
           // Handle both old format (array) and new format (object with trades, unresolvedCusips, diagnostics)
           let trades = Array.isArray(parseResult) ? parseResult : parseResult.trades;
@@ -2502,6 +2526,7 @@ const tradeController = {
                 : broker;
 
               for (const identifier of accountIdentifiers) {
+                assertImportActive();
                 if (!existingIdentifiers.has(identifier)) {
                   try {
                     const brokerName = brokerNames[accountBroker] || 'Trading';
@@ -2527,6 +2552,7 @@ const tradeController = {
               }
             }
           } catch (accountError) {
+            if (accountError.code === 'IMPORT_TIMEOUT') throw accountError;
             logger.logImport(`[ACCOUNTS] Error during account auto-creation: ${accountError.message}`);
             // Don't fail the import if account creation fails
           }
@@ -2583,6 +2609,7 @@ const tradeController = {
             // Convert each trade
             const convertedTrades = [];
             for (let i = 0; i < trades.length; i++) {
+              assertImportActive();
               const trade = trades[i];
               const inferredCurrency = trade.currencyConversionRequired
                 ? (trade.originalCurrency || trade.original_currency)
@@ -2698,13 +2725,11 @@ const tradeController = {
             // Continue without applying fees
           }
 
-          let imported = 0;
-          let failed = 0;
           let duplicates = 0;
           const failedTrades = [];
 
-          // Clear timeout since we're proceeding normally
-          clearTimeout(importTimeout);
+          assertImportActive();
+          if (!onVercel) clearTimeout(importTimeout);
 
           // Check for existing trades to avoid duplicates
           // Scope to selected account so the same trade can exist in different accounts
@@ -2769,6 +2794,7 @@ const tradeController = {
           // stop-loss market-data lookups). A per-row try/catch keeps one bad
           // row from failing the rest of the import.
           for (const tradeData of trades) {
+            assertImportActive();
             processedRows++;
             try {
               // Skip duplicate detection for trades that are updates to existing
@@ -2867,14 +2893,14 @@ const tradeController = {
           logger.logImport(`Import completed: ${imported} imported, ${failed} failed, ${duplicates} duplicates skipped`);
 
           // Schedule background CUSIP resolution if there are unresolved CUSIPs
-          if (unresolvedCusips.length > 0) {
+          if (unresolvedCusips.length > 0 && !onVercel) {
             logger.logImport(`Scheduling background CUSIP resolution for ${unresolvedCusips.length} CUSIPs`);
             const cusipResolver = require('../utils/cusipResolver');
             cusipResolver.scheduleResolution(fileUserId, unresolvedCusips);
           }
 
-          // Clear timeout on successful completion
-          clearTimeout(importTimeout);
+          assertImportActive();
+          if (!onVercel) clearTimeout(importTimeout);
 
           // Build error_details with diagnostics information
           const errorDetails = {
@@ -2941,11 +2967,16 @@ const tradeController = {
             }
           }
 
-          await db.query(`
+          assertImportActive();
+          const completion = await db.query(`
             UPDATE import_logs
             SET status = 'completed', trades_imported = $1, trades_failed = $2, completed_at = CURRENT_TIMESTAMP, error_details = $4
-            WHERE id = $3
+            WHERE id = $3 AND status = 'processing'
           `, [imported, failed, importId, errorDetails]);
+          clearTimeout(importTimeout);
+          if (onVercel && completion.rowCount === 0) {
+            return;
+          }
 
           publishInBackground('import.completed', {
             importId,
@@ -2969,6 +3000,8 @@ const tradeController = {
             console.warn('[WARNING] Failed to invalidate analytics cache:', cacheError.message);
           }
           
+
+          if (onVercel) return;
 
           // Check achievements and trigger leaderboard updates after import
           try {
@@ -3031,7 +3064,7 @@ const tradeController = {
           clearTimeout(importTimeout);
 
           const headerLine = getCsvHeaderLine(fileBuffer);
-          if (headerLine) {
+          if (headerLine && error.code !== 'IMPORT_TIMEOUT') {
             try {
               // Attempt to detect broker even though parsing failed
               const detectedBroker = detectBrokerFormat(fileBuffer);
@@ -3057,9 +3090,10 @@ const tradeController = {
           logger.logError(`Import process failed: ${error.message}`);
           await db.query(`
             UPDATE import_logs
-            SET status = 'failed', error_details = $1, completed_at = CURRENT_TIMESTAMP
+            SET status = 'failed', error_details = $1, completed_at = CURRENT_TIMESTAMP,
+                trades_imported = $3, trades_failed = $4
             WHERE id = $2
-          `, [stripNullCharacters({ error: error.message, stack: error.stack }), importId]);
+          `, [stripNullCharacters({ error: error.message, stack: error.stack }), importId, imported, failed]);
 
           publishInBackground('import.completed', {
             importId,
@@ -3083,6 +3117,17 @@ const tradeController = {
 
   async getImportStatus(req, res, next) {
     try {
+      if (isVercelRuntime()) {
+        await db.query(`
+          UPDATE import_logs
+          SET status = 'failed', completed_at = CURRENT_TIMESTAMP,
+              error_details = $3
+          WHERE id = $1 AND user_id = $2 AND status = 'processing'
+            AND created_at < CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+        `, [req.params.importId, req.user.id, {
+          error: 'Import stopped before completion. Review any saved trades and split remaining rows into smaller files.'
+        }]);
+      }
       const query = `
         SELECT * FROM import_logs
         WHERE id = $1 AND user_id = $2
@@ -4815,10 +4860,10 @@ const tradeController = {
         SELECT ta.*, t.is_public, t.user_id
         FROM trade_attachments ta
         JOIN trades t ON ta.trade_id = t.id
-        WHERE ta.trade_id = $1 AND ta.file_url LIKE $2
+        WHERE ta.trade_id = $1 AND regexp_replace(ta.file_url, '^.*/', '') = $2
       `;
 
-      const attachmentResult = await db.query(attachmentQuery, [tradeId, `%${sanitizedFilename}`]);
+      const attachmentResult = await db.query(attachmentQuery, [tradeId, sanitizedFilename]);
 
       if (attachmentResult.rows.length === 0) {
         return res.status(404).json({ error: 'Image not found' });
@@ -4843,6 +4888,9 @@ const tradeController = {
 
       // Build and validate file path to prevent path traversal
       const uploadsDir = path.resolve(__dirname, '../../uploads/trades');
+      if (imageStorage.isBlobStorage()) {
+        return await imageStorage.sendImage(res, uploadsDir, sanitizedFilename, attachment.file_type, attachment.is_public);
+      }
       const imagePath = path.join(uploadsDir, sanitizedFilename);
       const resolvedPath = path.resolve(imagePath);
 

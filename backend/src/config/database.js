@@ -1,3 +1,4 @@
+const { isVercelRuntime } = require('../utils/runtimeScope');
 const { Pool, types } = require('pg');
 require('dotenv').config();
 
@@ -8,24 +9,33 @@ require('dotenv').config();
 // date-only regex and cause timezone-shifted display (e.g. Jun 12 → Jun 11).
 types.setTypeParser(1082, val => val);
 
-// Increased pool size to handle concurrent requests and background services
-// Default to 50, allow override via env var
-const poolSize = parseInt(process.env.DB_POOL_SIZE || '50', 10);
+const poolSize = parseInt(process.env.DB_POOL_SIZE || (isVercelRuntime() ? '5' : '50'), 10);
 const connectionTimeout = parseInt(process.env.DB_CONNECTION_TIMEOUT || '5000', 10);
 const dbSchema = (process.env.DB_SCHEMA || '').trim();
 
 const poolConfig = {
-  host: process.env.DB_HOST,
-  port: process.env.DB_PORT,
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
   max: poolSize,
-  idleTimeoutMillis: 30000,
+  idleTimeoutMillis: isVercelRuntime() ? 5000 : 30000,
   connectionTimeoutMillis: connectionTimeout,
   // Allow statement timeout to prevent hanging queries
   statement_timeout: parseInt(process.env.DB_STATEMENT_TIMEOUT || '30000', 10),
 };
+
+if (process.env.DATABASE_URL) {
+  const databaseUrl = new URL(process.env.DATABASE_URL);
+  if (databaseUrl.hostname.endsWith('.neon.tech')) {
+    databaseUrl.searchParams.set('sslmode', 'verify-full');
+  }
+  poolConfig.connectionString = databaseUrl.toString();
+} else {
+  Object.assign(poolConfig, {
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT,
+    database: process.env.DB_NAME,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD
+  });
+}
 
 if (dbSchema) {
   if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(dbSchema)) {
@@ -36,6 +46,9 @@ if (dbSchema) {
 }
 
 const pool = new Pool(poolConfig);
+if (isVercelRuntime()) {
+  require('@vercel/functions').attachDatabasePool(pool);
+}
 
 pool.on('error', (err) => {
   console.error('Database pool error:', err);
@@ -85,7 +98,7 @@ async function query(text, params) {
   try {
     return await pool.query(text, params);
   } catch (error) {
-    if (!isMissingPostExitColumnError(error)) {
+    if (isVercelRuntime() || !isMissingPostExitColumnError(error)) {
       throw error;
     }
 

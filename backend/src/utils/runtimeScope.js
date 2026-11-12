@@ -1,3 +1,7 @@
+function isVercelRuntime() {
+  return process.env.SERVERLESS_RUNTIME === 'vercel' || Boolean(process.env.VERCEL);
+}
+
 function isBackgroundJobsDisabled() {
   return String(process.env.DISABLE_BACKGROUND_JOBS || '').toLowerCase() === 'true';
 }
@@ -36,6 +40,7 @@ function buildScopedUserCte(paramIndex = 1, cteName = 'scoped_user') {
 }
 
 module.exports = {
+  isVercelRuntime,
   isBackgroundJobsDisabled,
   getScopedUserEmail,
   buildScopedUserCte

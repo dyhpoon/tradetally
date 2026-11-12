@@ -2,6 +2,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const sharp = require('sharp');
 const db = require('../config/database');
+const imageStorage = require('../utils/imageStorage');
 
 const MAX_IMAGES = 5;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
@@ -15,12 +16,17 @@ async function prepareImage(attachment, uploads_dir = UPLOADS_DIR) {
       || !file_url.startsWith('/') || file_url.includes('://')) {
     throw new Error('Invalid attachment storage path');
   }
-  const storage_root = await fs.realpath(uploads_dir);
-  const image_path = await fs.realpath(path.join(storage_root, filename));
-  if (!image_path.startsWith(storage_root + path.sep)) throw new Error('Invalid attachment storage path');
-  const stat = await fs.stat(image_path);
-  if (!stat.isFile() || stat.size > 50 * 1024 * 1024) throw new Error('Attachment exceeds processing limit');
-  const source = await fs.readFile(image_path);
+  let source;
+  if (imageStorage.isBlobStorage()) {
+    source = await imageStorage.readImage(uploads_dir, filename);
+  } else {
+    const storage_root = await fs.realpath(uploads_dir);
+    const image_path = await fs.realpath(path.join(storage_root, filename));
+    if (!image_path.startsWith(storage_root + path.sep)) throw new Error('Invalid attachment storage path');
+    const stat = await fs.stat(image_path);
+    if (!stat.isFile() || stat.size > 50 * 1024 * 1024) throw new Error('Attachment exceeds processing limit');
+    source = await fs.readFile(image_path);
+  }
   let buffer;
   for (const quality of [90, 75, 60]) {
     buffer = await sharp(source, { limitInputPixels: 80_000_000 })

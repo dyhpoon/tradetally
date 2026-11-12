@@ -76,7 +76,9 @@ router.put('/:id', updateEntry);
 router.delete('/:id', deleteEntry);
 
 // Image upload routes (with compression)
-router.post('/:id/images', imageUpload.array('images', 10), uploadDiaryImages);
+const blobImageUpload = require('../middleware/blobImageUpload');
+router.post('/:id/images/upload-token', blobImageUpload.createUploadToken('diary'));
+router.post('/:id/images', blobImageUpload.receiveImage('diary', imageUpload.array('images', 10), uploadDiaryImages));
 router.delete('/:id/images/:attachmentId', deleteDiaryImage);
 
 // Upload attachment to diary entry (legacy)

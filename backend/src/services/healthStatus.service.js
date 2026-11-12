@@ -6,8 +6,10 @@ const newsScheduler = require('./newsScheduler');
 const storageHealthService = require('./storageHealth.service');
 const backupService = require('./backup.service');
 const db = require('../config/database');
+const { isBackgroundJobsDisabled } = require('../utils/runtimeScope');
 
 async function buildHealthStatus() {
+  const backgroundJobsDisabled = isBackgroundJobsDisabled();
   const health = {
     status: 'OK',
     timestamp: new Date().toISOString(),
@@ -17,7 +19,9 @@ async function buildHealthStatus() {
       jobRecovery: jobRecoveryService.getStatus(),
       enrichmentCacheCleanup: globalEnrichmentCacheCleanupService.getStatus(),
       backupScheduler: backupScheduler.getStatus(),
-      newsScheduler: await newsScheduler.getPersistentStatus(),
+      newsScheduler: backgroundJobsDisabled
+        ? { status: 'DISABLED', running: false }
+        : await newsScheduler.getPersistentStatus(),
       backups: { status: 'UNKNOWN' },
       storage: { status: 'UNKNOWN' }
     }
@@ -30,18 +34,30 @@ async function buildHealthStatus() {
     health.status = 'DEGRADED';
   }
 
-  if (!health.services.backgroundWorker.isRunning || !health.services.backgroundWorker.queueProcessing) {
+  if (backgroundJobsDisabled || process.env.ENABLE_TRADE_ENRICHMENT === 'false') {
+    health.services.backgroundWorker.status = 'DISABLED';
+  } else if (!health.services.backgroundWorker.isRunning || !health.services.backgroundWorker.queueProcessing) {
     health.status = 'DEGRADED';
     health.services.backgroundWorker.status = 'ERROR';
   } else {
     health.services.backgroundWorker.status = 'OK';
   }
 
-  if (!health.services.jobRecovery.isRunning) {
+  if (backgroundJobsDisabled || process.env.ENABLE_JOB_RECOVERY === 'false') {
+    health.services.jobRecovery.status = 'DISABLED';
+  } else if (!health.services.jobRecovery.isRunning) {
     health.status = 'DEGRADED';
     health.services.jobRecovery.status = 'ERROR';
   } else {
     health.services.jobRecovery.status = 'OK';
+  }
+
+  if (backgroundJobsDisabled) {
+    health.services.enrichmentCacheCleanup.status = 'DISABLED';
+  }
+
+  if (backgroundJobsDisabled || process.env.ENABLE_BACKUP_SCHEDULER === 'false') {
+    health.services.backupScheduler.status = 'DISABLED';
   }
 
   try {

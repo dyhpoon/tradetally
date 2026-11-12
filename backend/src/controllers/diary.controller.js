@@ -7,6 +7,7 @@ const aiService = require('../utils/aiService');
 const ensureString = require('../utils/ensureString');
 const db = require('../config/database');
 const imageProcessor = require('../utils/imageProcessor');
+const imageStorage = require('../utils/imageStorage');
 const path = require('path');
 const fs = require('fs').promises;
 const { verifyJwtToken, TOKEN_PURPOSES } = require('../middleware/auth');
@@ -369,10 +370,10 @@ const getDiaryImage = async (req, res) => {
       SELECT da.*, de.user_id
       FROM diary_attachments da
       JOIN diary_entries de ON da.diary_entry_id = de.id
-      WHERE da.diary_entry_id = $1 AND da.file_url LIKE $2
+      WHERE da.diary_entry_id = $1 AND regexp_replace(da.file_url, '^.*/', '') = $2
     `;
 
-    const attachmentResult = await db.query(attachmentQuery, [diaryEntryId, `%${sanitizedFilename}`]);
+    const attachmentResult = await db.query(attachmentQuery, [diaryEntryId, sanitizedFilename]);
 
     if (attachmentResult.rows.length === 0) {
       return res.status(404).json({ error: 'Image not found' });
@@ -388,6 +389,9 @@ const getDiaryImage = async (req, res) => {
 
     // Build and validate file path to prevent path traversal
     const uploadsDir = path.resolve(__dirname, '../../uploads/diary');
+    if (imageStorage.isBlobStorage()) {
+      return await imageStorage.sendImage(res, uploadsDir, sanitizedFilename, attachment.file_type);
+    }
     const imagePath = path.join(uploadsDir, sanitizedFilename);
     const resolvedPath = path.resolve(imagePath);
 
@@ -449,7 +453,7 @@ const deleteDiaryImage = async (req, res) => {
     const filename = path.basename(attachment.file_url);
     const filePath = path.join(__dirname, '../../uploads/diary', filename);
     try {
-      await fs.unlink(filePath);
+      await imageProcessor.deleteImage(filePath);
       console.log(`Deleted diary image: ${filePath}`);
     } catch (error) {
       console.error('Failed to delete diary image file %s:', filePath, error.message);

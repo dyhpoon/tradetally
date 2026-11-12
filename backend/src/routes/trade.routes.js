@@ -924,7 +924,9 @@ router.post('/:id/split', authenticate, tradeController.splitTrade);
 router.post('/:id/attachments', authenticate, upload.single('file'), tradeController.uploadAttachment);
 router.delete('/:id/attachments/:attachmentId', authenticate, tradeController.deleteAttachment);
 // Image-specific routes
-router.post('/:id/images', authenticate, imageUpload.array('images', 10), tradeController.uploadTradeImages);
+const blobImageUpload = require('../middleware/blobImageUpload');
+router.post('/:id/images/upload-token', authenticate, blobImageUpload.createUploadToken('trades'));
+router.post('/:id/images', authenticate, blobImageUpload.receiveImage('trades', imageUpload.array('images', 10), tradeController.uploadTradeImages));
 router.get('/:id/images/:filename', optionalAuth, tradeController.getTradeImage);
 router.delete('/:id/images/:attachmentId', authenticate, tradeController.deleteTradeImage);
 // Chart management routes

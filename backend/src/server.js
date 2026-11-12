@@ -1,4 +1,5 @@
 const express = require('express');
+const { timingSafeEqual } = require('crypto');
 const cors = require('cors');
 const compression = require('compression');
 const morgan = require('morgan');
@@ -13,6 +14,7 @@ const { ensurePostExitSchema } = require('./utils/ensurePostExitSchema');
 const { initializePostHogTelemetry, shutdown: shutdownPostHogTelemetry } = require('./posthog-telemetry');
 const { securityMiddleware } = require('./middleware/security');
 const logger = require('./utils/logger');
+const imageStorage = require('./utils/imageStorage');
 const authRoutes = require('./routes/auth.routes');
 const userRoutes = require('./routes/user.routes');
 const tradeRoutes = require('./routes/trade.routes');
@@ -131,6 +133,24 @@ app.disable('x-powered-by');
 const trustProxySetting = parseTrustProxySetting(process.env.TRUST_PROXY);
 app.set('trust proxy', trustProxySetting);
 
+// Platform cron uses its own secret and must not share browser rate limits.
+app.get('/api/cron/cleanup-images', async (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  const secret = process.env.CRON_SECRET;
+  const supplied = Buffer.from(req.get('authorization') || '');
+  const expected = Buffer.from(`Bearer ${secret || ''}`);
+  if (!secret || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const { examined, deleted, hasMore } = await imageStorage.cleanupPendingImages();
+    res.json({ examined, deleted, hasMore });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Rate limiting configuration - can be disabled or adjusted via environment variables
 // RATE_LIMIT_ENABLED=false disables rate limiting entirely (useful for self-hosted instances)
 // RATE_LIMIT_MAX sets the maximum requests per window (default: 1000)
@@ -175,6 +195,8 @@ app.use(compression({
 // Optimized CORS configuration
 const allowedOrigins = [
   process.env.FRONTEND_URL || 'http://localhost:5173',
+  ...[process.env.VERCEL_URL, process.env.VERCEL_PROJECT_PRODUCTION_URL]
+    .filter(Boolean).map((hostname) => `https://${hostname}`),
   ...(process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(',').map((origin) => origin.trim()).filter(Boolean)
     : [])

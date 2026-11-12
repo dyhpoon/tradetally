@@ -206,6 +206,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, toRef } from 'vue'
 import { useNotification } from '@/composables/useNotification'
 import { useAuthedImage } from '@/composables/useAuthedImage'
 import api from '@/services/api'
+import { uploadImages as uploadImageFiles } from '@/services/imageUpload'
 import { formatPercent } from '@/utils/formatters'
 
 const props = defineProps({
@@ -348,27 +349,18 @@ async function uploadPendingImages(entryId) {
   uploadResults.value = []
 
   try {
-    const formData = new FormData()
-    pendingFiles.value.forEach((fileObj) => {
-      formData.append('images', fileObj.file)
-    })
-
-    const response = await api.post(`/diary/${entryId}/images`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    })
+    const response = await uploadImageFiles(`/diary/${entryId}/images`, pendingFiles.value.map(item => item.file))
 
     uploadResults.value = response.data.images || []
 
     const successCount = response.data.successfulUploads || 0
     const totalCount = response.data.totalImages || 0
+    pendingFiles.value = pendingFiles.value.filter((item, index) => uploadResults.value[index]?.error)
+    emit('pending-changed', pendingFiles.value)
+    if (successCount > 0) emit('uploaded', response.data.images.filter(image => !image.error))
 
     if (successCount === totalCount) {
       showSuccess('Success', `${successCount} image${successCount > 1 ? 's' : ''} uploaded successfully`)
-      pendingFiles.value = [] // Clear pending files
-      emit('pending-changed', pendingFiles.value)
-      emit('uploaded', response.data.images)
       return { success: true, images: response.data.images }
     } else {
       showError('Partial Success', `${successCount} of ${totalCount} images uploaded successfully`)
@@ -377,7 +369,7 @@ async function uploadPendingImages(entryId) {
 
   } catch (error) {
     console.error('Image upload error:', error)
-    showError('Upload Failed', error.response?.data?.error || 'Failed to upload images')
+    showError('Upload Failed', error.response?.data?.error || error.message || 'Failed to upload images')
     return { success: false, error: error.message }
   } finally {
     uploading.value = false

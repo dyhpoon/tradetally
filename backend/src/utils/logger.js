@@ -1,3 +1,4 @@
+const { isVercelRuntime } = require('./runtimeScope');
 const fs = require('fs');
 const path = require('path');
 const { sanitizeForLogging, sanitizeErrorForLogging } = require('./logSanitizer');
@@ -9,7 +10,9 @@ const RETENTION_SWEEP_MS = 24 * 60 * 60 * 1000;
 
 class Logger {
   constructor() {
-    this.logDir = path.join(__dirname, '../logs');
+    this.logDir = process.env.LOG_DIR || (isVercelRuntime()
+      ? path.join(require('os').tmpdir(), 'tradetally-logs')
+      : path.join(__dirname, '../logs'));
     this.allowedLogFilenamePattern = /^[a-z0-9-]+_\d{4}-\d{2}-\d{2}\.log$/i;
     this.ensureLogDirectory();
 
@@ -28,7 +31,7 @@ class Logger {
     });
 
     this.retentionTimer = null;
-    if (process.env.NODE_ENV !== 'test') {
+    if (process.env.NODE_ENV !== 'test' && !isVercelRuntime()) {
       // Retention sweep: deferred so it does not block boot, then every 24h.
       setImmediate(() => {
         this.runRetentionSweep().catch(() => {});

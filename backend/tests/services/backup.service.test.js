@@ -1,3 +1,5 @@
+jest.mock('@vercel/blob', () => ({ put: jest.fn(), get: jest.fn(), del: jest.fn() }));
+
 jest.mock('../../src/config/database', () => ({
   query: jest.fn(),
   connect: jest.fn()
@@ -201,5 +203,140 @@ describe('backup service hardening', () => {
     const insert = client.query.mock.calls.find(([query]) => String(query).startsWith('INSERT INTO'));
     expect(insert[0]).toContain('INSERT INTO "custom_table" ("id", "label")');
     expect(insert[0]).toContain('RETURNING "id"');
+  });
+});
+
+
+describe('private Blob backups', () => {
+  const blob = require('@vercel/blob');
+  const originalProvider = process.env.IMAGE_STORAGE_PROVIDER;
+  const originalScheduler = process.env.ENABLE_BACKUP_SCHEDULER;
+  const filePath = 'vercel-blob:backups/tradetally-backup-2026-11-13.json';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.IMAGE_STORAGE_PROVIDER = 'vercel-blob';
+    blob.put.mockResolvedValue({});
+    blob.del.mockResolvedValue();
+    db.query.mockResolvedValue({ rows: [] });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (originalProvider === undefined) delete process.env.IMAGE_STORAGE_PROVIDER;
+    else process.env.IMAGE_STORAGE_PROVIDER = originalProvider;
+    if (originalScheduler === undefined) delete process.env.ENABLE_BACKUP_SCHEDULER;
+    else process.env.ENABLE_BACKUP_SCHEDULER = originalScheduler;
+  });
+
+  test('creates a private JSON object and stores its stable reference and UTF-8 size', async () => {
+    const data = { version: '3.0', tables: { diary: [{ notes: '交易', image: 'diary/image.webp' }] } };
+    jest.spyOn(backupService, 'fetchAllData').mockResolvedValue(data);
+    db.query.mockResolvedValue({ rows: [{ id: 'backup-1', status: 'completed' }] });
+
+    const result = await backupService.createFullSiteBackup('admin-1');
+    const contents = JSON.stringify(data, null, 2);
+
+    expect(blob.put).toHaveBeenCalledWith('backups/' + result.filename, contents, {
+      access: 'private', contentType: 'application/json', addRandomSuffix: false, allowOverwrite: false
+    });
+    expect(db.query.mock.calls[0][1]).toEqual([
+      'admin-1', result.filename, 'vercel-blob:backups/' + result.filename,
+      Buffer.byteLength(contents), 'manual', 'completed'
+    ]);
+    expect(result.size).toBe(Buffer.byteLength(contents));
+    expect(fs.mkdir).not.toHaveBeenCalled();
+    expect(fs.writeFile).not.toHaveBeenCalled();
+  });
+
+  test('concurrent cloud backups receive distinct object names', async () => {
+    jest.spyOn(backupService, 'fetchAllData').mockResolvedValue({ tables: {} });
+    jest.spyOn(Date.prototype, 'toISOString').mockReturnValue('2026-11-13T00:00:00.000Z');
+    db.query.mockResolvedValue({ rows: [{ status: 'completed' }] });
+
+    const [first, second] = await Promise.all([
+      backupService.createFullSiteBackup('admin-1'),
+      backupService.createFullSiteBackup('admin-1')
+    ]);
+
+    expect(first.filename).not.toBe(second.filename);
+    expect(blob.put).toHaveBeenCalledTimes(2);
+  });
+
+  test('records failed uploads without claiming a completed backup', async () => {
+    jest.spyOn(backupService, 'fetchAllData').mockResolvedValue({ tables: {} });
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    blob.put.mockRejectedValueOnce(new Error('Storage unavailable'));
+
+    await expect(backupService.createFullSiteBackup('admin-1')).rejects.toThrow('Storage unavailable');
+
+    expect(db.query).toHaveBeenCalledTimes(1);
+    expect(db.query.mock.calls[0][1]).toEqual([
+      'admin-1', expect.any(String), expect.stringMatching(/^vercel-blob:backups\//),
+      'manual', 'failed', 'Storage unavailable'
+    ]);
+  });
+
+  test('reads private objects by validated pathname without accepting arbitrary URLs', async () => {
+    const result = { stream: new ReadableStream() };
+    blob.get.mockResolvedValue(result);
+    await expect(backupService.getBackupBlob(filePath)).resolves.toBe(result);
+    expect(blob.get).toHaveBeenCalledWith('backups/tradetally-backup-2026-11-13.json', {
+      access: 'private', useCache: false
+    });
+  });
+
+  test.each([
+    'vercel-blob:backups/../trades/image.json',
+    'vercel-blob:backups/%2e%2e/image.json',
+    'vercel-blob:backups/backup.json?token=x',
+    'vercel-blob:backups/backup.json#x',
+    'vercel-blob:backups/backup.json/other.json',
+    'vercel-blob:trades/image.json',
+    'https://attacker.example/backups/backup.json',
+    '../../etc/passwd'
+  ])('rejects unsafe stored reference: %s', async unsafePath => {
+    await expect(backupService.getBackupBlob(unsafePath)).rejects.toThrow('Invalid backup path');
+    await expect(backupService.deleteBackupFile(unsafePath)).rejects.toThrow('Invalid backup path');
+    expect(blob.get).not.toHaveBeenCalled();
+    expect(blob.del).not.toHaveBeenCalled();
+    expect(fs.unlink).not.toHaveBeenCalled();
+  });
+
+  test('retention deletes the object before deleting its metadata', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'backup-1', file_path: filePath }] });
+
+    await expect(backupService.deleteOldBackups(30)).resolves.toBe(1);
+
+    expect(blob.del).toHaveBeenCalledWith('backups/tradetally-backup-2026-11-13.json');
+    expect(blob.del.mock.invocationCallOrder[0]).toBeLessThan(db.query.mock.invocationCallOrder[1]);
+    expect(db.query).toHaveBeenLastCalledWith('DELETE FROM backups WHERE id = $1', ['backup-1']);
+    expect(fs.unlink).not.toHaveBeenCalled();
+  });
+
+  test('retention keeps metadata when object deletion fails so it can be retried', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'backup-1', file_path: filePath }] });
+    blob.del.mockRejectedValueOnce(new Error('Storage unavailable'));
+
+    await expect(backupService.deleteOldBackups(30)).resolves.toBe(0);
+
+    expect(db.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('health reports durable storage, latest manual backup and disabled scheduling accurately', async () => {
+    process.env.ENABLE_BACKUP_SCHEDULER = 'false';
+    jest.spyOn(backupService, 'getBackupSettings').mockResolvedValue({ enabled: false, last_backup: null });
+    const createdAt = '2026-01-01T00:00:00.000Z';
+    db.query.mockResolvedValueOnce({ rows: [{ created_at: createdAt }] });
+
+    const health = await backupService.getBackupHealth();
+
+    expect(health).toMatchObject({
+      scheduler_enabled: false, storage_provider: 'vercel-blob', local_only_storage: false,
+      backup_dir: 'vercel-blob:backups/', includes_image_files: false, last_backup: createdAt
+    });
+    expect(health.warnings.join(' ')).toContain('Manual backups remain available');
+    expect(health.warnings.join(' ')).not.toMatch(/No successful backup|stale|host filesystem/);
   });
 });

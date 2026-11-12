@@ -138,7 +138,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useNotification } from '@/composables/useNotification'
 import { formatPercent } from '@/utils/formatters'
-import api from '@/services/api'
+import { uploadImages as uploadImageFiles } from '@/services/imageUpload'
 
 const props = defineProps({
   tradeId: {
@@ -269,33 +269,24 @@ async function uploadImages() {
   uploadResults.value = []
 
   try {
-    const formData = new FormData()
-    selectedFiles.value.forEach((fileObj) => {
-      formData.append('images', fileObj.file)
-    })
-
-    const response = await api.post(`/trades/${props.tradeId}/images`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    })
+    const response = await uploadImageFiles(`/trades/${props.tradeId}/images`, selectedFiles.value.map(item => item.file))
 
     uploadResults.value = response.data.images || []
     
     const successCount = response.data.successfulUploads || 0
     const totalCount = response.data.totalImages || 0
+    selectedFiles.value = selectedFiles.value.filter((item, index) => uploadResults.value[index]?.error)
+    if (successCount > 0) emit('uploaded')
 
     if (successCount === totalCount) {
       showSuccess('Success', `${successCount} image${successCount > 1 ? 's' : ''} uploaded successfully`)
-      selectedFiles.value = [] // Clear selected files
-      emit('uploaded') // Notify parent component
     } else {
       showError('Partial Success', `${successCount} of ${totalCount} images uploaded successfully`)
     }
 
   } catch (error) {
     console.error('Image upload error:', error)
-    showError('Upload Failed', error.response?.data?.error || 'Failed to upload images')
+    showError('Upload Failed', error.response?.data?.error || error.message || 'Failed to upload images')
   } finally {
     uploading.value = false
   }
@@ -305,18 +296,11 @@ async function flushPendingImages(tradeId) {
   if (selectedFiles.value.length === 0) return { success: true, count: 0 }
 
   try {
-    const formData = new FormData()
-    selectedFiles.value.forEach((fileObj) => {
-      formData.append('images', fileObj.file)
-    })
-
-    const response = await api.post(`/trades/${tradeId}/images`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
+    const response = await uploadImageFiles(`/trades/${tradeId}/images`, selectedFiles.value.map(item => item.file))
 
     const successCount = response.data.successfulUploads || 0
-    selectedFiles.value = []
-    return { success: true, count: successCount, images: response.data.images || [] }
+    selectedFiles.value = selectedFiles.value.filter((item, index) => response.data.images[index]?.error)
+    return { success: selectedFiles.value.length === 0, count: successCount, images: response.data.images || [] }
   } catch (err) {
     console.error('[ImageUpload] Failed to flush images:', err)
     return { success: false, error: err }

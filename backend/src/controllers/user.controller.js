@@ -8,6 +8,7 @@ const db = require('../config/database');
 const path = require('path');
 const fs = require('fs').promises;
 const imageProcessor = require('../utils/imageProcessor');
+const imageStorage = require('../utils/imageStorage');
 const refreshTokenService = require('../services/refreshToken.service');
 const BillingService = require('../services/billingService');
 const { clearAuthUserCache } = require('../middleware/auth');
@@ -253,6 +254,9 @@ const userController = {
       }
 
       const uploadsDir = path.resolve(getAvatarUploadsDir());
+      if (imageStorage.isBlobStorage()) {
+        return await imageStorage.sendImage(res, uploadsDir, sanitizedFilename, 'image/webp', true);
+      }
       const resolvedPath = path.resolve(path.join(uploadsDir, sanitizedFilename));
 
       if (!resolvedPath.startsWith(uploadsDir + path.sep) && resolvedPath !== uploadsDir) {

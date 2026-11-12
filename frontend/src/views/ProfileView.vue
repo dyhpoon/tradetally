@@ -1530,6 +1530,7 @@ import { useProAccess } from "@/composables/useProAccess";
 import NotificationPreferences from "@/components/profile/NotificationPreferences.vue";
 import PriceAlertWebhookManager from "@/components/price-alerts/PriceAlertWebhookManager.vue";
 import api from "@/services/api";
+import { uploadAvatar as uploadAvatarImage } from '@/services/imageUpload';
 import { formatDecimal } from "@/utils/formatters";
 import { TIMEZONE_OPTIONS } from "@/utils/timezone";
 import BaseSelect from "@/components/common/BaseSelect.vue";
@@ -1874,11 +1875,7 @@ async function uploadAvatar() {
     if (!avatarPreviewFile.value) return;
     avatarUploading.value = true;
     try {
-        const formData = new FormData();
-        formData.append('avatar', avatarPreviewFile.value);
-        // Don't set Content-Type — axios sets the multipart boundary header,
-        // and api.js skips its application/json default for FormData payloads.
-        await api.post('/users/avatar', formData);
+        await uploadAvatarImage(avatarPreviewFile.value);
         clearAvatarPreview();
         await authStore.fetchUser();
         showSuccess('Success', 'Profile picture updated.');

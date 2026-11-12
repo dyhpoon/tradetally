@@ -1,5 +1,6 @@
 const backupService = require('../services/backup.service');
-const path = require('path');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 const fs = require('fs').promises;
 
 /**
@@ -139,6 +140,16 @@ class BackupController {
         return res.status(400).json({ error: 'Invalid backup path' });
       }
 
+      if (backupService.isBlobBackup(resolvedPath)) {
+        const blob = await backupService.getBackupBlob(resolvedPath);
+        if (!blob) return res.status(404).json({ error: 'Backup file not found' });
+        res.attachment(backup.filename);
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Cache-Control', 'private, no-store');
+        await pipeline(Readable.fromWeb(blob.stream), res);
+        return;
+      }
+
       // Check if file exists
       try {
         await fs.access(resolvedPath);
@@ -181,12 +192,7 @@ class BackupController {
         return res.status(400).json({ error: 'Invalid backup path' });
       }
 
-      // Delete file if it exists
-      try {
-        await fs.unlink(resolvedPath);
-      } catch (error) {
-        console.warn('[BACKUP] File not found on disk, continuing with database deletion');
-      }
+      await backupService.deleteBackupFile(resolvedPath);
 
       // Delete from database
       const db = require('../config/database');

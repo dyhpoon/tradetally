@@ -97,7 +97,9 @@ router.get('/onboarding-status', authenticate, userController.getOnboardingStatu
  *       200:
  *         description: Avatar deleted successfully
  */
-router.post('/avatar', authenticate, upload.single('avatar'), userController.uploadAvatar);
+const blobImageUpload = require('../middleware/blobImageUpload');
+router.post('/avatar/upload-token', authenticate, blobImageUpload.createUploadToken('avatars'));
+router.post('/avatar', authenticate, blobImageUpload.receiveImage('avatars', upload.single('avatar'), userController.uploadAvatar));
 router.delete('/avatar', authenticate, userController.deleteAvatar);
 // Public serving endpoint — avatars are shown on public profile pages, so no
 // auth required to fetch one (anyone with the URL can view it, as with any
