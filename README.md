@@ -96,6 +96,7 @@ Configure these variables for each deployment environment:
 | `IMAGE_STORAGE_PROVIDER` / `VITE_IMAGE_STORAGE_PROVIDER` | `vercel-blob` |
 | `IMAGE_STORAGE_ENV` | `production` or `preview`, matching the environment |
 | `VITE_API_URL` | `/api` |
+| `VITE_MAX_IMPORT_SIZE_MB` | `4`, leaving room for request metadata below the platform limit |
 | `NODE_ENV` / `TRUST_PROXY` | `production` / `1` |
 | `DB_POOL_SIZE` / `DB_CONNECTION_TIMEOUT` | `5` / `15000` |
 | `DISABLE_BACKGROUND_JOBS` | `true` |

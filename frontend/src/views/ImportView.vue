@@ -73,7 +73,7 @@
                     </label>
                     <p class="pl-1">or drag and drop</p>
                   </div>
-                  <p class="text-xs text-gray-500 dark:text-gray-400">CSV, TXT, Excel (.xlsx), HTML reports, ZIP archives, or Sierra Chart DATA files (up to 50MB)</p>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">CSV, TXT, Excel (.xlsx), HTML reports, ZIP archives, or Sierra Chart DATA files (up to {{ maxImportSizeMb }}MB)</p>
                 </div>
               </div>
               <div v-if="selectedFile" class="mt-2 flex items-center justify-between">
@@ -1320,6 +1320,7 @@ const importStage = ref('')
 const selectedBroker = ref('auto')
 const sourceTimezone = ref('America/New_York')
 const selectedFile = ref(null)
+const maxImportSizeMb = Number(import.meta.env.VITE_MAX_IMPORT_SIZE_MB || 50)
 const isAnalyzingFile = ref(false)
 const fileAnalysis = ref({
   rowCount: null,
@@ -2399,6 +2400,11 @@ function getFileExtension(name) {
 }
 
 async function setSelectedFile(file, source = 'picker') {
+  if (file && file.size > maxImportSizeMb * 1024 * 1024) {
+    clearSelectedFile()
+    error.value = `This file exceeds the ${maxImportSizeMb}MB limit. Export a shorter date range or split it into smaller files.`
+    return
+  }
   const supportedExtension = file && SUPPORTED_IMPORT_EXTENSION.test(file.name)
   if (file && (file.type === 'text/csv' || file.type === 'application/csv' || supportedExtension)) {
     selectedFile.value = file

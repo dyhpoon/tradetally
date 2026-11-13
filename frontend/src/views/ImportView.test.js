@@ -1,6 +1,6 @@
 import { shallowMount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   authStore: {
@@ -151,6 +151,33 @@ describe('ImportView remembered import preferences', () => {
     mocks.api.get.mockImplementation(apiGet)
     parseCSVHeaders.mockResolvedValue(['Date', 'Time', 'Type', 'Ref #', 'Description'])
     parseCSVSampleRows.mockResolvedValue({})
+  })
+
+  afterEach(() => vi.unstubAllEnvs())
+
+  it.each([4 * 1024 * 1024, 4 * 1024 * 1024 + 1])('checks the configured import limit at %i bytes', async (size) => {
+    vi.stubEnv('VITE_MAX_IMPORT_SIZE_MB', '4')
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.text()).toContain('up to 4MB')
+
+    const file = new File(['Date,Time,Type,Ref #,Description\n1,2,3,4,5'], 'trades.csv', { type: 'text/csv' })
+    Object.defineProperty(file, 'size', { value: size })
+    const input = wrapper.get('#file-upload')
+    Object.defineProperty(input.element, 'files', { value: [file], configurable: true })
+    parseCSVHeaders.mockClear()
+    await input.trigger('change')
+    await flushPromises()
+
+    if (size > 4 * 1024 * 1024) {
+      expect(wrapper.text()).toContain('This file exceeds the 4MB limit.')
+      expect(parseCSVHeaders).not.toHaveBeenCalled()
+      expect(wrapper.get('button[type="submit"]').element.disabled).toBe(true)
+    } else {
+      expect(wrapper.text()).toContain('Selected: trades.csv')
+      expect(parseCSVHeaders).toHaveBeenCalled()
+    }
+    wrapper.unmount()
   })
 
   it('defaults to automatic classification with notes off', async () => {
