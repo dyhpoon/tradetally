@@ -541,7 +541,7 @@
                                         <span>{{ apiKey.keyPrefix }}...</span>
                                         <span class="mx-2">•</span>
                                         <span>{{
-                                            apiKey.permissions.join(", ")
+                                            apiKeyAccess(apiKey)
                                         }}</span>
                                         <span
                                             v-if="apiKey.lastUsedAt"
@@ -1250,7 +1250,24 @@
                             <label for="apiKeyPermissions" class="label"
                                 >Permissions</label
                             >
-                            <div class="space-y-2">
+                            <div class="flex items-center mb-3">
+                                <input
+                                    id="permTradesOnly"
+                                    v-model="tradesOnlyApiKey"
+                                    type="checkbox"
+                                    class="checkbox"
+                                />
+                                <label
+                                    for="permTradesOnly"
+                                    class="ml-2 block text-sm text-gray-900 dark:text-white"
+                                >
+                                    Trades only — read and write trade records
+                                </label>
+                            </div>
+                            <p v-if="tradesOnlyApiKey" class="text-sm text-gray-600 dark:text-gray-400">
+                                Grants trades:read and trades:write only.
+                            </p>
+                            <div v-else class="space-y-2">
                                 <div class="flex items-center">
                                     <input
                                         id="permRead"
@@ -1331,7 +1348,7 @@
                                 type="submit"
                                 :disabled="
                                     createApiKeyLoading ||
-                                    createApiKeyForm.permissions.length === 0
+                                    (!tradesOnlyApiKey && createApiKeyForm.permissions.length === 0)
                                 "
                                 class="btn-primary"
                             >
@@ -1397,7 +1414,7 @@
                             </p>
                             <p>
                                 <strong>Permissions:</strong>
-                                {{ createdApiKey.permissions.join(", ") }}
+                                {{ apiKeyAccess(createdApiKey) }}
                             </p>
                             <p v-if="createdApiKey.expiresAt">
                                 <strong>Expires:</strong>
@@ -1624,6 +1641,7 @@ const showCreateApiKeyModal = ref(false);
 const showApiKeyCreatedModal = ref(false);
 const createApiKeyLoading = ref(false);
 const createdApiKey = ref(null);
+const tradesOnlyApiKey = ref(false);
 const createApiKeyForm = ref({
     name: "",
     permissions: ["read"],
@@ -2137,8 +2155,16 @@ async function fetchApiKeys() {
     }
 }
 
+function apiKeyAccess(apiKey) {
+    const access = apiKey.permissions?.length
+        ? apiKey.permissions
+        : apiKey.effectiveScopes || apiKey.scopes || [];
+    return access.join(", ");
+}
+
 function closeCreateApiKeyModal() {
     showCreateApiKeyModal.value = false;
+    tradesOnlyApiKey.value = false;
     createApiKeyForm.value = {
         name: "",
         permissions: ["read"],
@@ -2149,7 +2175,10 @@ function closeCreateApiKeyModal() {
 async function createApiKey() {
     try {
         createApiKeyLoading.value = true;
-        const response = await api.post("/api-keys", createApiKeyForm.value);
+        const payload = tradesOnlyApiKey.value
+            ? { ...createApiKeyForm.value, permissions: [], scopes: ["trades:read", "trades:write"] }
+            : createApiKeyForm.value;
+        const response = await api.post("/api-keys", payload);
 
         createdApiKey.value = response.data.apiKey;
         showCreateApiKeyModal.value = false;
@@ -2172,6 +2201,7 @@ async function createApiKey() {
 function closeApiKeyCreatedModal() {
     showApiKeyCreatedModal.value = false;
     createdApiKey.value = null;
+    tradesOnlyApiKey.value = false;
     // Reset the form
     createApiKeyForm.value = {
         name: "",
