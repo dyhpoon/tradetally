@@ -394,9 +394,31 @@ function getExecutionSignedQuantity(execution) {
   const action = String(execution.action || execution.side || '').toLowerCase();
   const quantity = Number(execution.quantity || 0);
   if (!quantity) return 0;
+  if (action === 'long' || action === 'short') {
+    // A side-labelled record is either an opening fill (Tastytrade/Questrade
+    // label entries with the trade side) or a grouped round trip that carries
+    // its own exit. A grouped round trip is already flat.
+    if (executionHasExit(execution)) return 0;
+    return action === 'long' ? quantity : -quantity;
+  }
   if (action === 'buy' || action === 'cover') return quantity;
-  if (action === 'sell' || action === 'short') return -quantity;
+  if (action === 'sell') return -quantity;
   return 0;
+}
+
+function hasValue(value) {
+  return value !== null && value !== undefined && value !== '';
+}
+
+function executionHasExit(execution) {
+  return hasValue(execution.exitPrice) || hasValue(execution.exit_price) ||
+    hasValue(execution.exitTime) || hasValue(execution.exit_time);
+}
+
+function isGroupedRoundTripExecution(execution) {
+  if (hasValue(execution.action)) return false;
+  const side = String(execution.side || '').toLowerCase();
+  return (side === 'long' || side === 'short') && executionHasExit(execution);
 }
 
 function getTradeValueMultiplier(trade) {
@@ -653,7 +675,9 @@ function repairTradeReversals(trades, diagnostics) {
 
   for (const trade of trades) {
     const executions = Array.isArray(trade.executions) ? trade.executions : [];
-    if (executions.length === 0) {
+    // Grouped round-trip records (manual "grouped" executions) describe lots,
+    // not fills, so the fill-level rebuild below cannot reconstruct them.
+    if (executions.length === 0 || executions.some(isGroupedRoundTripExecution)) {
       repairedTrades.push(trade);
       continue;
     }
