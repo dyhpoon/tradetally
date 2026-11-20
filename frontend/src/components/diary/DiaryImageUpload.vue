@@ -20,6 +20,7 @@
           type="file"
           multiple
           accept="image/jpeg,image/jpg,image/png,image/webp"
+          :disabled="uploading"
           @change="handleFileSelect"
           class="hidden"
         />
@@ -31,12 +32,13 @@
           <div>
             <button
               type="button"
+              :disabled="uploading"
               @click="$refs.fileInput.click()"
               class="btn-link"
             >
               Choose files
             </button>
-            <span class="text-gray-500 dark:text-gray-400"> or drag and drop</span>
+            <span class="text-gray-500 dark:text-gray-400" role="status">{{ uploading ? 'Uploading images…' : ' or drag and drop' }}</span>
           </div>
           <p class="text-xs text-gray-500 dark:text-gray-400">
             JPEG, PNG, WebP up to 50MB each &middot; paste from clipboard with {{ pasteShortcut }}
@@ -58,7 +60,7 @@
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
         <div
           v-for="(file, index) in pendingFiles"
-          :key="'pending-' + index"
+          :key="file.preview"
           class="relative group"
         >
           <div class="aspect-square bg-gray-100 dark:bg-gray-700 rounded-lg overflow-hidden">
@@ -84,6 +86,8 @@
           <!-- Remove button -->
           <button
             type="button"
+            :disabled="uploading"
+            :aria-label="'Remove ' + file.name"
             @click="removePendingFile(index)"
             class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
           >
@@ -153,8 +157,8 @@
       <h4 class="heading-sub">Upload Results</h4>
       <div class="space-y-1">
         <div
-          v-for="result in uploadResults"
-          :key="result.id || result.filename"
+          v-for="(result, index) in uploadResults"
+          :key="result.id || index"
           class="flex items-center justify-between text-sm p-2 rounded"
           :class="result.error ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-400' : 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-400'"
         >
@@ -183,6 +187,7 @@
     >
       <div class="relative max-w-4xl max-h-[90vh] p-4">
         <button
+          type="button"
           @click="previewImage = null"
           class="absolute top-2 right-2 bg-white dark:bg-gray-800 rounded-full p-2 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-700 z-10"
         >
@@ -202,7 +207,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, toRef } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, toRef } from 'vue'
 import { useNotification } from '@/composables/useNotification'
 import { useAuthedImage } from '@/composables/useAuthedImage'
 import api from '@/services/api'
@@ -286,9 +291,14 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('paste', handlePaste)
+  pendingFiles.value.forEach(item => URL.revokeObjectURL(item.preview))
 })
 
 function addFiles(files) {
+  if (uploading.value) {
+    showError('Upload in progress', 'Wait for this upload to finish before adding more images.')
+    return
+  }
   const validFiles = files.filter(file => {
     // Check file type
     if (!supportedTypes.includes(file.type)) {
@@ -305,25 +315,16 @@ function addFiles(files) {
     return true
   })
 
-  // Create previews and add to pending files
-  validFiles.forEach(file => {
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      pendingFiles.value.push({
-        file: file,
-        name: file.name,
-        size: file.size,
-        preview: e.target.result
-      })
-      // Notify parent of pending files change
-      emit('pending-changed', pendingFiles.value)
-    }
-    reader.readAsDataURL(file)
-  })
+  pendingFiles.value.push(...validFiles.map(file => ({
+    file, name: file.name, size: file.size, preview: URL.createObjectURL(file)
+  })))
+  emit('pending-changed', pendingFiles.value)
 }
 
 function removePendingFile(index) {
-  pendingFiles.value.splice(index, 1)
+  if (uploading.value) return
+  const [removed] = pendingFiles.value.splice(index, 1)
+  URL.revokeObjectURL(removed.preview)
   emit('pending-changed', pendingFiles.value)
 }
 
@@ -341,31 +342,35 @@ function openImagePreview(image) {
 
 // Expose method for parent to call after saving entry
 async function uploadPendingImages(entryId) {
-  if (pendingFiles.value.length === 0) {
-    return { success: true, images: [] }
-  }
+  if (uploading.value) return { success: false, error: 'Image upload in progress' }
+  if (pendingFiles.value.length === 0) return { success: true, images: [] }
 
   uploading.value = true
   uploadResults.value = []
+  const batch = pendingFiles.value.slice()
 
   try {
-    const response = await uploadImageFiles(`/diary/${entryId}/images`, pendingFiles.value.map(item => item.file))
-
-    uploadResults.value = response.data.images || []
-
-    const successCount = response.data.successfulUploads || 0
-    const totalCount = response.data.totalImages || 0
-    pendingFiles.value = pendingFiles.value.filter((item, index) => uploadResults.value[index]?.error)
+    const response = await uploadImageFiles(`/diary/${entryId}/images`, batch.map(item => item.file))
+    const results = batch.map((item, index) => {
+      const image = response.data.images?.[index]
+      return image?.id || image?.error ? image : { filename: item.name, error: 'Image upload was not confirmed' }
+    })
+    uploadResults.value = results
+    pendingFiles.value = batch.filter((item, index) => {
+      if (results[index].error) return true
+      URL.revokeObjectURL(item.preview)
+      return false
+    })
     emit('pending-changed', pendingFiles.value)
-    if (successCount > 0) emit('uploaded', response.data.images.filter(image => !image.error))
-
-    if (successCount === totalCount) {
-      showSuccess('Success', `${successCount} image${successCount > 1 ? 's' : ''} uploaded successfully`)
-      return { success: true, images: response.data.images }
+    const uploaded = results.filter(image => !image.error)
+    if (uploaded.length) emit('uploaded', uploaded)
+    const success = pendingFiles.value.length === 0
+    if (success) {
+      showSuccess('Success', `${uploaded.length} image${uploaded.length > 1 ? 's' : ''} uploaded successfully`)
     } else {
-      showError('Partial Success', `${successCount} of ${totalCount} images uploaded successfully`)
-      return { success: false, images: response.data.images }
+      showError('Upload incomplete', `${uploaded.length} of ${batch.length} images uploaded successfully`)
     }
+    return { success, images: results }
 
   } catch (error) {
     console.error('Image upload error:', error)

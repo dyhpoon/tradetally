@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import deployment from '../../../vercel.json'
 import api from './api'
 import { put } from '@vercel/blob/client'
 import { uploadImages, uploadAvatar } from './imageUpload'
@@ -15,6 +16,14 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs())
 
 describe('image uploads', () => {
+  it('allows the private Blob transfer API in the deployed browser policy', () => {
+    const headers = deployment.services.web.headers.find(rule => rule.source === '/(.*)').headers
+    const policy = headers.find(header => header.key === 'Content-Security-Policy').value
+    const sources = policy.split(';').map(rule => rule.trim().split(/\s+/)).find(([name]) => name === 'connect-src')
+    expect(sources).toContain('https://vercel.com/api/blob/')
+    expect(sources).not.toContain('https://vercel.com')
+  })
+
   it('uploads large files directly and sends only receipts to the API, sequentially', async () => {
     const files = [new File([new Uint8Array(9 * 1024 * 1024)], 'large.png'), new File(['small'], 'small.png')]
     const events = []
@@ -40,6 +49,32 @@ describe('image uploads', () => {
       .mockResolvedValueOnce({ data: { images: [{ id: 'second' }] } })
     const response = await uploadImages('/diary/1/images', [new File(['a'], 'a.png'), new File(['b'], 'b.png')])
     expect(response.data).toEqual({ images: [{ filename: 'a.png', error: 'Connection lost' }, { id: 'second' }], totalImages: 2, successfulUploads: 1 })
+  })
+
+  it('keeps an unconfirmed image in its slot when the next image succeeds', async () => {
+    api.post.mockImplementation(async (endpoint, data) => {
+      if (endpoint.endsWith('/upload-token')) return { data: { pathname: data.filename, receipt: data.filename } }
+      return { data: { images: data.uploadReceipt === 'a.png' ? [] : [{ id: 'b' }] } }
+    })
+    const response = await uploadImages('/diary/1/images', [new File(['a'], 'a.png'), new File(['b'], 'b.png')])
+    expect(response.data.images).toEqual([{ filename: 'a.png', error: expect.stringContaining('did not confirm') }, { id: 'b' }])
+    expect(response.data.successfulUploads).toBe(1)
+  })
+
+  it('aborts a stalled transfer and returns a retryable per-file error', async () => {
+    vi.useFakeTimers()
+    try {
+      api.post.mockResolvedValue({ data: { pathname: 'slow.png' } })
+      put.mockImplementation((_path, _file, { abortSignal }) => new Promise((_resolve, reject) => {
+        abortSignal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      }))
+      const upload = uploadImages('/diary/1/images', [new File(['x'], 'slow.png')])
+      await vi.advanceTimersByTimeAsync(300000)
+      expect((await upload).data.images).toEqual([{ filename: 'slow.png', error: expect.stringContaining('timed out') }])
+      expect(api.post).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('keeps local multipart uploads and the 10-image batch limit', async () => {

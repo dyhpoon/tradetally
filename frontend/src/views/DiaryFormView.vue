@@ -36,8 +36,8 @@
     </div>
 
     <!-- Form -->
-    <div v-if="!loading && !error" class="space-y-8">
-      <form @submit.prevent="saveEntry" class="space-y-6">
+    <form v-if="!loading && !error" @submit.prevent="saveEntry" class="space-y-8">
+      <fieldset :disabled="!!saveStage" class="min-w-0 space-y-6">
         <!-- Template Selector -->
         <div v-if="!isEditing" class="callout-info">
           <div class="flex items-center justify-between mb-3">
@@ -544,7 +544,8 @@
           </div>
 
           <DiaryImageUpload
-            v-else
+            v-if="showAttachmentsSection || hasPendingImages"
+            v-show="showAttachmentsSection"
             ref="imageUploadRef"
             :diary-entry-id="entryId"
             :existing-images="entryAttachments"
@@ -553,6 +554,8 @@
             @pending-changed="handlePendingImagesChange"
           />
         </div>
+
+        <p v-if="saveError" role="alert" class="callout-danger">{{ saveError }}</p>
 
         <!-- Form Actions -->
         <div class="flex justify-end space-x-4 pt-6 border-t border-gray-200 dark:border-gray-700">
@@ -564,14 +567,14 @@
           </router-link>
           <button
             type="submit"
-            :disabled="saving"
+            :disabled="!!saveStage"
             class="btn-primary"
           >
-            {{ saving ? 'Saving...' : (isEditing ? 'Update Entry' : 'Create Entry') }}
+            {{ saveButtonLabel }}
           </button>
         </div>
-      </form>
-    </div>
+      </fieldset>
+    </form>
   </div>
 </template>
 
@@ -609,7 +612,9 @@ const templateStore = useDiaryTemplateStore()
 
 // Component state
 const loading = ref(false)
-const saving = ref(false)
+const saveStage = ref('')
+const saveError = ref('')
+let lastSavedPayload = null
 const error = ref(null)
 const showTemplates = ref(false)
 const availableTemplates = ref([])
@@ -647,7 +652,13 @@ const entryId = ref(null)
 const entryAttachments = ref([])
 
 // Computed properties
-const isEditing = computed(() => !!route.params.id)
+const isEditing = computed(() => !!route.params.id || !!entryId.value)
+const saveButtonLabel = computed(() => {
+  if (saveStage.value === 'entry') return 'Saving entry…'
+  if (saveStage.value === 'images') return 'Uploading images…'
+  if (entryId.value && saveError.value && hasPendingImages.value) return 'Save and retry images'
+  return isEditing.value ? 'Update Entry' : 'Create Entry'
+})
 
 // Template methods
 const loadTemplates = async () => {
@@ -1020,9 +1031,10 @@ const handlePendingImagesChange = (pendingFiles) => {
 }
 
 const saveEntry = async () => {
+  if (saveStage.value) return
   try {
-    saving.value = true
-    error.value = null
+    saveStage.value = 'entry'
+    saveError.value = ''
 
     // Prepare form data
     const entryData = {
@@ -1039,31 +1051,35 @@ const saveEntry = async () => {
       lessonsLearned: form.value.lessonsLearned.trim() || null
     }
 
-    if (isEditing.value) {
-      await diaryStore.updateEntry(route.params.id, entryData)
-
-      // Upload any pending images for existing entry
-      if (imageUploadRef.value?.hasPendingFiles()) {
-        await imageUploadRef.value.uploadPendingImages(route.params.id)
-      }
-
-      router.push('/diary')
-    } else {
+    const payload = JSON.stringify(entryData)
+    if (!entryId.value) {
       const savedEntry = await diaryStore.saveEntry(entryData)
+      entryId.value = savedEntry.id
+    } else if (payload !== lastSavedPayload) {
+      await diaryStore.updateEntry(entryId.value, entryData)
+    }
+    lastSavedPayload = payload
 
-      // Upload pending images if any
-      if (savedEntry && savedEntry.id && imageUploadRef.value?.hasPendingFiles()) {
-        entryId.value = savedEntry.id
-        await imageUploadRef.value.uploadPendingImages(savedEntry.id)
+    if (imageUploadRef.value?.hasPendingFiles()) {
+      saveStage.value = 'images'
+      const result = await imageUploadRef.value.uploadPendingImages(entryId.value)
+      if (!result.success) {
+        showAttachmentsSection.value = true
+        saveError.value = 'Entry saved. Some images did not upload. Retry the remaining images below.'
+        return
       }
-
-      router.push('/diary')
     }
 
+    await router.push('/diary')
   } catch (err) {
-    error.value = err.response?.data?.error || 'Failed to save diary entry'
+    if (saveStage.value === 'images') {
+      showAttachmentsSection.value = true
+      saveError.value = 'Entry saved. Check your attachments and retry the remaining images.'
+    } else {
+      saveError.value = err.response?.data?.error || err.message || 'Failed to save diary entry'
+    }
   } finally {
-    saving.value = false
+    saveStage.value = ''
   }
 }
 

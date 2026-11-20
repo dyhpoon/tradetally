@@ -8,12 +8,22 @@ async function uploadDirectFile(endpoint, file) {
     size: file.size
   })
   const { put } = await import('@vercel/blob/client')
-  await put(data.pathname, file, {
-    access: 'private',
-    token: data.clientToken,
-    contentType: data.contentType,
-    multipart: file.size > 8 * 1024 * 1024
-  })
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), uploadOptions.timeout)
+  try {
+    await put(data.pathname, file, {
+      access: 'private',
+      token: data.clientToken,
+      contentType: data.contentType,
+      multipart: file.size > 8 * 1024 * 1024,
+      abortSignal: controller.signal
+    })
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('Image upload timed out. Please try again.')
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
   return api.post(endpoint, { uploadReceipt: data.receipt }, uploadOptions)
 }
 
@@ -30,7 +40,11 @@ export async function uploadImages(endpoint, files) {
   for (const file of files) {
     try {
       const response = await uploadDirectFile(endpoint, file)
-      images.push(...response.data.images)
+      const result = response.data?.images
+      if (result?.length !== 1 || !(result[0]?.id || result[0]?.error)) {
+        throw new Error('The server did not confirm this image upload')
+      }
+      images.push(result[0])
     } catch (error) {
       images.push({ filename: file.name, error: error.response?.data?.error || error.message || 'Image upload failed' })
     }
