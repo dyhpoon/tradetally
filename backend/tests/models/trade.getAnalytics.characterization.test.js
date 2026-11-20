@@ -91,6 +91,15 @@ function captureSql() {
   return db.query.mock.calls[0][0];
 }
 
+describe('TradeQueries.cacheKey', () => {
+  test('bypasses pre-FX-fix caches while preserving canonical filters and invalidation prefix', () => {
+    const key = TradeQueries.cacheKey('user-1', { tags: ['b', 'a'], symbol: 'TEST', broker: '', accounts: [] });
+    expect(key).toBe(TradeQueries.cacheKey('user-1', { symbol: 'TEST', tags: ['a', 'b'] }));
+    expect(key).toMatch(/^analytics:user_user-1:/);
+    expect(key).not.toBe('analytics:user_user-1:{"symbol":"TEST","tags":["a","b"]}');
+  });
+});
+
 describe('TradeQueries.getAnalytics characterization', () => {
   beforeEach(() => {
     jest.clearAllMocks();

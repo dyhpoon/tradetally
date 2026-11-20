@@ -351,6 +351,27 @@ describe('DashboardView loading and advanced filter wiring', () => {
     expect(wrapper.findAll('pre')).toHaveLength(0)
   })
 
+  it('ignores analytics cached before the execution currency fix', async () => {
+    wrapper = await mountDashboard()
+    const cacheKey = wrapper.vm.getAnalyticsCacheKey()
+    const cached = sessionStorage.getItem(cacheKey)
+    expect(cached).toBeTruthy()
+    wrapper.unmount()
+    wrapper = null
+    sessionStorage.removeItem(cacheKey)
+    sessionStorage.setItem(cacheKey.replace('dashboard_analytics_v2_', 'dashboard_analytics_'), cached)
+
+    let resolveAnalytics
+    apiMock.get.mockImplementation(url => url.startsWith('/trades/analytics')
+      ? new Promise(resolve => { resolveAnalytics = resolve })
+      : defaultGetImplementation(url))
+    wrapper = await mountDashboard()
+    expect(wrapper.find('.spinner.spinner-lg').exists()).toBe(true)
+    resolveAnalytics(await defaultGetImplementation('/trades/analytics'))
+    await flushPromises()
+    expect(wrapper.find('.spinner.spinner-lg').exists()).toBe(false)
+  })
+
   it('does not render stale cached positions without their trade list', async () => {
     wrapper = await mountDashboard()
     const cache_key = wrapper.vm.getOpenPositionsCacheKey()

@@ -2693,7 +2693,7 @@ function getAnalyticsCacheKey() {
     selectedAccount.value || '',
     advancedParts
   ]
-  return 'dashboard_analytics_' + parts.join('_')
+  return 'dashboard_analytics_v2_' + parts.join('_')
 }
 
 function is_dashboard_record(value) {

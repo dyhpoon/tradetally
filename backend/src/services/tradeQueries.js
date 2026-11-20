@@ -1222,7 +1222,7 @@ class TradeQueries {
         canonical[k] = v;
       }
     }
-    return `analytics:user_${userId}:${JSON.stringify(canonical)}`;
+    return `analytics:user_${userId}:execution-fx-v2:${JSON.stringify(canonical)}`;
   }
 }
 

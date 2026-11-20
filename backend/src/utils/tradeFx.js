@@ -97,7 +97,10 @@ function normalizeRowToUsd(row, usdRates) {
   if (Array.isArray(execs)) {
     for (const exec of execs) {
       if (!exec || typeof exec !== 'object') continue;
-      scale(exec, ['price', 'entryPrice', 'entry_price', 'exitPrice', 'exit_price', 'pnl', 'p_l', 'commission', 'fees']);
+      scale(exec, [
+        'price', 'entryPrice', 'entry_price', 'exitPrice', 'exit_price', 'pnl', 'p_l',
+        'realized_pnl', 'gross_realized_pnl', 'commission', 'fees'
+      ]);
     }
   }
   return mult;
