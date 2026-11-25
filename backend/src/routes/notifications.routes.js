@@ -6,7 +6,14 @@ const { sseAuthenticate } = require('../middleware/sseAuth');
 const { requiresTier } = require('../middleware/tierAuth');
 
 // SSE endpoint for real-time notifications (uses special auth for EventSource)
-router.get('/stream', sseAuthenticate, requiresTier('pro'), notificationsController.subscribeToNotifications);
+router.get('/stream', (req, res, next) => {
+  if (process.env.VITE_DISABLE_NOTIFICATION_STREAM !== 'true') {
+    return next();
+  }
+
+  // Existing tabs receive a retry delay without holding a connection open.
+  res.set('Cache-Control', 'no-store').type('text/event-stream').end('retry: 86400000\n\n');
+}, sseAuthenticate, requiresTier('pro'), notificationsController.subscribeToNotifications);
 
 // All other routes require standard authentication
 router.use(authenticate);

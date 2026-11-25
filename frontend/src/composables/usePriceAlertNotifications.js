@@ -116,6 +116,10 @@ export function usePriceAlertNotifications() {
   }
   
   const connect = () => {
+    if (import.meta.env.VITE_DISABLE_NOTIFICATION_STREAM === 'true') {
+      return
+    }
+
     // Skip verbose logging - only log important state changes
     if (!authStore.isAuthenticated || (authStore.user?.tier !== 'pro' && authStore.user?.billingEnabled !== false)) {
       return
